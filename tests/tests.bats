@@ -2,6 +2,7 @@
 
 SUT_IMAGE=jenkins-ssh-slave
 SUT_CONTAINER=bats-jenkins-ssh-slave
+JENKINS_CONTAINER=bats-jenkins
 
 load test_helpers
 load keys
@@ -14,10 +15,26 @@ load keys
 @test "clean test container" {
 	docker kill $SUT_CONTAINER &>/dev/null ||:
 	docker rm -fv $SUT_CONTAINER &>/dev/null ||:
+	docker kill $JENKINS_CONTAINER &>/dev/null ||:
+	docker rm -fv $JENKINS_CONTAINER &>/dev/null ||:
 }
 
 @test "create slave container" {
 	docker run -d --name $SUT_CONTAINER -P $SUT_IMAGE "$PUBLIC_SSH_KEY"
+}
+
+@test "create jenkins master container" {
+	docker run -d \
+		--name $JENKINS_CONTAINER \
+		-p 8080 \
+		--link $SUT_CONTAINER:slave \
+		--volume $BATS_TEST_DIRNAME/init.groovy.d/:/usr/share/jenkins/ref/init.groovy.d/:ro \
+		jenkins
+	# add the private ssh key to the master
+	docker exec -u jenkins $JENKINS_CONTAINER sh -c "
+		mkdir /var/jenkins_home/.ssh
+		echo '$PRIVATE_SSH_KEY' >/var/jenkins_home/.ssh/id_rsa
+	"
 }
 
 @test "slave container is running" {
@@ -49,27 +66,22 @@ load keys
 		)
 }
 
-# run a given command through ssh on the test container.
-# Use the $status, $output and $lines variables to make assertions
-function run_through_ssh {
-	SSH_PORT=$(get_port 22)
-	if [ "$SSH_PORT" = "" ]; then
-		echo "failed to get SSH port"
-		false
-	else
-		TMP_PRIV_KEY_FILE=$(mktemp -p $BATS_TMPDIR bats_private_ssh_key_XXXXXXX)
-		echo "$PRIVATE_SSH_KEY" > $TMP_PRIV_KEY_FILE \
-		 	&& chmod 0600 $TMP_PRIV_KEY_FILE
-
-		run ssh -i $TMP_PRIV_KEY_FILE \
-			-o LogLevel=quiet \
-			-o UserKnownHostsFile=/dev/null \
-			-o StrictHostKeyChecking=no \
-			-l jenkins \
-			localhost \
-			-p $SSH_PORT \
-			"$@"
-
-		rm -f $TMP_PRIV_KEY_FILE
-	fi
+@test "Jenkins master container is running" {
+	sleep 1  # give time to eventually fail to initialize
+	retry 3 1 assert "true" docker inspect -f {{.State.Running}} $JENKINS_CONTAINER
 }
+
+@test "Jenkins master is initialized" {
+	retry 30 5 curl_jenkins /api/json
+}
+
+@test "slave node created on master" {
+	retry 2 5 curl_jenkins /computer/test-slave/
+}
+
+@test "Jenkins node connected" {
+	jq_is_available_or_skip
+	local url=$(get_jenkins_url)/computer/test-slave/api/json
+    assert "false" sh -c "curl -sS --fail $url | jq '.offline'"
+}
+

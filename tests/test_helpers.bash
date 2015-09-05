@@ -37,7 +37,60 @@ function retry {
     false
 }
 
+# run a given command through ssh on the test container.
+# Use the $status, $output and $lines variables to make assertions
+function run_through_ssh {
+    SSH_PORT=$(get_port 22)
+    if [ "$SSH_PORT" = "" ]; then
+        echo "failed to get SSH port"
+        false
+    else
+        TMP_PRIV_KEY_FILE=$(mktemp -p $BATS_TMPDIR bats_private_ssh_key_XXXXXXX)
+        echo "$PRIVATE_SSH_KEY" > $TMP_PRIV_KEY_FILE \
+            && chmod 0600 $TMP_PRIV_KEY_FILE
+
+        run ssh -i $TMP_PRIV_KEY_FILE \
+            -o LogLevel=quiet \
+            -o UserKnownHostsFile=/dev/null \
+            -o StrictHostKeyChecking=no \
+            -l jenkins \
+            localhost \
+            -p $SSH_PORT \
+            "$@"
+
+        rm -f $TMP_PRIV_KEY_FILE
+    fi
+}
+
 # return the published port for given container port $1
 function get_port {
     docker port $SUT_CONTAINER $1 | cut -d: -f2
+}
+
+# print to stdout the base url for the jenkins
+function get_jenkins_url {
+    echo "http://localhost:$(docker port $JENKINS_CONTAINER 8080 | cut -d: -f2)"
+}
+
+# send a HTTP request to the jenkins instance.
+# $1 path to query
+# $2 optional curl options
+function curl_jenkins {
+    local url_path=$1
+    shift
+    local curl_opts="$@"
+    local url=$(get_jenkins_url)
+    echo curl --output /dev/null --silent --head --fail --connect-timeout 30 --max-time 60 "$curl_opts" ${url}${url_path} >&2
+    run curl --output /dev/null --silent --head --fail --connect-timeout 30 --max-time 60 "$curl_opts" ${url}${url_path}
+    if [ "$status" -eq 0 ]; then
+        true
+    else
+        echo "URL ${url}${url_path} failed" >&2
+        echo "output: $output" >&2
+        false
+    fi
+}
+
+function jq_is_available_or_skip {
+    type jq &>/dev/null || skip "jq is required"
 }
